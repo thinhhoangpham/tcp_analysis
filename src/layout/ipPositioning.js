@@ -139,8 +139,7 @@ export function computeIPPositioning(packets, options = {}) {
         topPad = TOP_PAD,
         timearcsOrder = null,
         dotRadius = 40,
-        collapsedIPs = null,
-        separateFlags = false
+        collapsedIPs = null
     } = options;
 
     // Count packets per IP
@@ -154,14 +153,15 @@ export function computeIPPositioning(packets, options = {}) {
     const ipPairCounts = computeIPPairCounts(packets);
 
     // Calculate row height for each IP based on its pair count
-    // Each pair gets SUB_ROW_HEIGHT (= RADIUS_MAX * 2 = 30px) so max-size circles fit
-    // When separateFlags is on, double the sub-row height for vertically spread flag circles
-    const effectiveSubRowHeight = separateFlags ? SUB_ROW_HEIGHT * 2 : SUB_ROW_HEIGHT;
+    // Each pair gets SUB_ROW_HEIGHT (= RADIUS_MAX * 2 = 30px) so max-size circles fit.
+    // When separateFlags is on, heights start at base level here and are then
+    // expanded post-binning by computeFlagSeparationHeights() in tcp-analysis.js
+    // to match the actual circle stacking at each sub-row.
     const ipRowHeights = new Map();
 
     ipList.forEach(ip => {
         const pairCount = ipPairCounts.get(ip) || 1;
-        const height = Math.max(rowGap, pairCount * (effectiveSubRowHeight + SUB_ROW_GAP));
+        const height = Math.max(rowGap, pairCount * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
         ipRowHeights.set(ip, height);
     });
 

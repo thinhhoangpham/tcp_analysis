@@ -369,7 +369,8 @@ The visualization uses a sophisticated layout system to prevent overlapping when
 
 **Per-IP Dynamic Row Heights** (`src/layout/ipPositioning.js`):
 - `computeIPPairCounts()` counts unique destination IPs per source IP
-- Each IP row height is calculated as: `max(ROW_GAP, pairCount * 12 + 8)` pixels
+- Base row height: `max(ROW_GAP, pairCount * (SUB_ROW_HEIGHT + SUB_ROW_GAP))` (i.e. `pairCount * 32px`)
+- When Separate Flags is on, heights are expanded post-binning by `computeFlagSeparationHeights()` / `computeSubRowLayout()` in `tcp-analysis.js` to fit actual circle stacking
 - `ipRowHeights` Map stored in state for rendering access
 - Cumulative positioning: each IP's y = previous IP's y + previous IP's row height
 
@@ -379,6 +380,15 @@ The visualization uses a sophisticated layout system to prevent overlapping when
 - First pair (index 0) aligns with the IP label baseline
 - Subsequent pairs grow downward within the row's allocated height
 - `makeIpPairKey(srcIp, dstIp)` creates canonical keys (alphabetically sorted)
+
+**Sub-Row Target IP Labels** (`src/rendering/circles.js`):
+- When an IP row is expanded and has multiple sub-rows, each sub-row displays a small italic label showing the target (partner) IP address
+- Labels are rendered as `.sub-row-ip-label` text elements inside the circle layer, positioned just left of the leftmost circle in each sub-row (`x = firstCircle.cx - radius - 4px`)
+- Y position uses the stable sub-row center (from `ipPairOrderByRow`), unaffected by flag separation
+- Labels are only shown for multi-pair rows; single-pair IPs and collapsed rows are skipped
+- Target IP is extracted from the canonical pair key by comparing against the row's `src_ip`
+- Labels are cleared and re-created on every `renderCircles()` call (zoom, pan, filter changes)
+- Styled: 9px monospace, italic, `#888` fill, `pointer-events: none`
 
 **Sub-Row Ghost Arcs** (`src/rendering/circles.js`, `src/rendering/svgSetup.js`):
 - Persistent ghost arcs show IP pair connections at the sub-row level
@@ -409,7 +419,8 @@ The visualization uses a sophisticated layout system to prevent overlapping when
 **Row Collapse Behavior**:
 - All IP rows with multiple pairs start **collapsed by default** (`defaultCollapseApplied` flag)
 - `state.layout.collapsedIPs` Set tracks which IPs have their sub-rows merged
-- Click individual IP labels to expand/collapse; "Collapse All"/"Expand All" buttons rendered inline to the left of each IP row label (not in the Control Panel)
+- Click individual IP labels to expand/collapse; per-IP toggle buttons are SVG circles at a fixed left-aligned column (`toggleX = -168` in `svgSetup.js`)
+- **"Expand All"/"Collapse All"** is a sticky pill-shaped HTML button (`#expand-all-btn`) at the top of `#chart-container` with `position: sticky; top: 8px`. Visually distinct from per-IP circles (pill shape with text label, dynamic width: 96px/106px). Created in `createOrUpdateExpandAllBtn()` in `tcp-analysis.js`
 - Collapsed rows merge all pair bins at same (time, yPos, flagType) into single circles
 
 **Key Data Structures**:
@@ -418,14 +429,30 @@ The visualization uses a sophisticated layout system to prevent overlapping when
 // ipRowHeights: Map<ip, heightInPixels>
 // ipPairCounts: Map<ip, numberOfUniquePairs>
 // collapsedIPs: Set<ip> - IPs whose sub-rows are collapsed
+// subRowHeights: Map<"ip|pairKey", number> - per-sub-row effective height (null when separateFlags off)
+// subRowOffsets: Map<"ip|pairKey", number> - per-sub-row cumulative Y offset from baseY (null when separateFlags off)
 ```
+
+**IMPORTANT — `ipPairOrderByRow` must be updated in-place**:
+`renderIPRowLabels()` in `svgSetup.js` captures `ipPairOrderByRow` in mouseover closures. If you replace the Map with a new object (`state.layout.ipPairOrderByRow = newMap`), those closures become stale and lookups fail (causing full-row highlight instead of sub-row highlight). Always update in-place:
+```javascript
+const newOrder = computeIPPairOrderByRow(packets, ipPositions);
+state.layout.ipPairOrderByRow.clear();
+for (const [k, v] of newOrder) state.layout.ipPairOrderByRow.set(k, v);
+```
+This pattern is used at 4 sites: resolution change, drag-reorder, collapse/expand, and flag separation adjustment.
 
 ### Circle View Modes (TCP Analysis)
 
 **Separate Flags** (`#separateFlags` checkbox, `state.ui.separateFlags`):
 - Prevents overlapping circles of different flag types at the same time bin
-- Groups co-located circles by `(binCenter, yPosWithOffset)`, sorts by TCP lifecycle phase order (`FLAG_PHASE_ORDER`: SYN → SYN+ACK → ACK → PSH → FIN → RST → OTHER), then spreads them vertically within the available sub-row height
-- Implemented in `src/rendering/circles.js:157-191`
+- Groups co-located circles by `(binCenter, yPosWithOffset)`, sorts by TCP lifecycle phase order (`FLAG_PHASE_ORDER`: SYN → SYN+ACK → ACK → PSH → FIN → RST → OTHER), then packs them sequentially (each circle touching its neighbors) so the total vertical span = sum of all diameters
+- **Adaptive per-sub-row heights** (post-binning pipeline):
+  1. `computeFlagSeparationHeights(binnedPackets, rScale)` in `tcp-analysis.js` — groups binned packets by `(src_ip, ipPairKey, timeKey)`, computes sum-of-diameters per group, keeps the max per sub-row → returns `Map<"ip|pairKey", maxHeight>`
+  2. `computeSubRowLayout(perSubRowHeight, ipPairOrderByRow, ...)` — converts per-sub-row heights into cumulative Y offsets with variable stride: `center[i] = center[i-1] + h[i-1]/2 + SUB_ROW_GAP + h[i]/2`. Also computes updated IP row heights (sum of all sub-row heights + gaps). Returns `{ subRowOffsets, subRowHeights, ipRowHeightUpdates }`
+  3. Results stored in `state.layout.subRowHeights` and `state.layout.subRowOffsets`; reset to `null` when Separate Flags is off. All stride calculations (rendering, hover detection, box selection) use offset lookups with fallback to uniform `pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP)`
+- For collapsed rows, the span is clamped to available row height and falls back to even spacing
+- Implemented in `src/rendering/circles.js:174-224` (circle packing), `tcp-analysis.js:409-507` (height computation)
 - Named "Separate Flags" in the UI (not "Stacked Circles" — avoid that term)
 - Default: off (`separateFlags: false` in `tcp-analysis.js:252`)
 
@@ -460,6 +487,35 @@ Drag-to-brush selection allows users to select arcs/nodes for analysis and expor
 - **`computeSelectionBounds()`**: Recomputes selection rectangle pixel bounds from stored IP names using current scales/node positions (not stale pixel values). Shared by `createPersistentSelectionVisual` and `updatePersistentSelectionVisuals`.
 - **`redrawAllPersistentSelections()` / `redrawPersistentSelectionsFn`**: Clears and re-creates all selection DOM elements. Called after positions finalize (timearcs animation end, force layout setup, component layout change) and from the force layout resize handler.
 - **Resize behavior**: Timearcs mode calls `render()` which preserves `persistentSelections` and redraws after animation. Force layout mode bypasses `render()` and calls `redrawPersistentSelectionsFn` directly.
+
+### Box Selection System (tcp-analysis.js)
+
+Box selection allows users to select packets on circle rows for raw CSV export:
+- **Enable**: `#enableBoxSelection` checkbox in Control Panel (`state.ui.enableBoxSelection`)
+- **Interaction**: When enabled, click-drag horizontally across any IP row (like text selection — no modifier key needed). Box height auto-snaps to the detected row. Normal pan/drag is disabled while box selection mode is on; wheel zoom still works.
+- **Collapsed mode**: Box covers entire IP row; paired boxes drawn on all partner IP rows via `allPairs`
+- **Expanded mode**: Box targets a specific sub-row; paired box drawn on partner IP's matching sub-row
+- **Multiple selections** supported; all use dark grey (`BOX_SELECTION_COLOR = '#555'`)
+- **Persistent selections** (`boxSelections[]`): Stored as data coordinates (time range + IP names), recomputed to pixels on zoom/resize via `redrawAllBoxSelections()`
+- **Export**: `exportBoxSelectionCSV()` (async) loads raw packets via `fetchChunksForRange(start, end, 'raw')` — fetches actual individual packets with microsecond timestamps, ports, and flags regardless of current zoom resolution. Falls back to `state.data.full` if raw resolution unavailable.
+
+**SVG layering** (inside `mainGroup`, appended by `setupBoxSelectionDrag()`):
+1. Overlay rect (`.box-select-overlay`) — `pointer-events: all` when enabled, captures drag events
+2. Selections group (`.box-selections-group`) — `pointer-events: none` on `<g>` so rects pass through to overlay; `foreignObject` buttons override with `pointer-events: all` for clickability
+
+**Zoom integration**:
+- `src/interaction/zoom.js`: Zoom filter blocks drag-pan when `isBoxSelectionActive()` returns true
+- `src/interaction/timearcsZoomHandler.js`: Calls `redrawAllBoxSelections()` after zoom render
+- Drag-reorder handler also calls `redrawAllBoxSelections()`
+
+**Key functions** (all in `tcp-analysis.js`):
+- `setupBoxSelectionDrag()` — creates overlay + selections group, wires drag handlers
+- `detectIPRowFromY(y)` — finds IP row/sub-row for a Y coordinate
+- `computeSubRowBounds(ip, pairKey)` — returns `{boxY, boxH}` for source or destination
+- `finalizeBoxSelection(start, end, rowInfo)` — converts pixel coords to selection data object
+- `createBoxSelectionVisual(selection)` — draws source rect, partner rects, label, Export/Remove buttons
+- `redrawAllBoxSelections()` — clears and recreates all visuals from stored data
+- `exportBoxSelectionCSV(selection)` — async; loads raw packets, filters by IP pair, downloads CSV
 
 ### Shared Highlight Logic
 

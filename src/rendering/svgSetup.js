@@ -172,7 +172,9 @@ export function renderIPRowLabels(options) {
         collapsedIPs = null,
         onToggleCollapse = null,
         ipPairOrderByRow = null,
-        ipRowHeights = null
+        ipRowHeights = null,
+        subRowHeights = null,
+        subRowOffsets = null
     } = options;
 
     // Create row highlight rectangles (behind everything)
@@ -243,16 +245,10 @@ export function renderIPRowLabels(options) {
 
             const node = d3.select(this);
             const isCollapsed = collapsedIPs && collapsedIPs.has(ip);
-            const labelNode = node.select('.node-label').node();
 
-            // Position triangle to the left of the label text using actual text width
-            // Extra spacing (18px) accounts for label expansion when highlighted (bold + larger font)
-            let toggleX = -24;
-            try {
-                const bbox = labelNode.getBBox();
-                // bbox.x is negative (text-anchor: end), so left edge = bbox.x
-                toggleX = bbox.x - 18;
-            } catch (_) {}
+            // Fixed left-aligned position for all toggle buttons (consistent column)
+            // With margin.left=180 and labels at x=-10, -168 places buttons at ~12px from SVG left edge
+            const toggleX = -168;
 
             const toggle = node.append('g')
                 .attr('class', 'collapse-toggle')
@@ -321,16 +317,21 @@ export function renderIPRowLabels(options) {
             for (const [pairKey, pairIndex] of pairInfo.order) {
                 const parts = pairKey.split('<->');
                 const partnerIp = parts[0] === ip ? parts[1] : parts[0];
-                const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+                // Use precomputed per-sub-row offset and height when available
+                const offsetKey = `${ip}|${pairKey}`;
+                const offset = subRowOffsets && subRowOffsets.get(offsetKey);
+                const centerY = baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
+                const heightKey = `${ip}|${pairKey}`;
+                const effectiveSRH = (subRowHeights && subRowHeights.get(heightKey)) || SUB_ROW_HEIGHT;
 
                 // Visual highlight rect spans full chart width (no pointer events)
                 highlightGroup.append('rect')
                     .attr('class', 'sub-row-highlight')
                     .datum({ ip, partnerIp, pairKey, pairIndex })
                     .attr('x', -150)
-                    .attr('y', centerY - SUB_ROW_HEIGHT / 2)
+                    .attr('y', centerY - effectiveSRH / 2)
                     .attr('width', chartWidth + 150)
-                    .attr('height', SUB_ROW_HEIGHT)
+                    .attr('height', effectiveSRH)
                     .style('fill', '#4dabf7')
                     .style('opacity', 0);
 
@@ -341,9 +342,9 @@ export function renderIPRowLabels(options) {
                         .attr('class', 'sub-row-hover-target')
                         .datum({ ip, partnerIp, pairKey, pairIndex })
                         .attr('x', -150)
-                        .attr('y', centerY - SUB_ROW_HEIGHT / 2)
+                        .attr('y', centerY - effectiveSRH / 2)
                         .attr('width', 150)
-                        .attr('height', SUB_ROW_HEIGHT)
+                        .attr('height', effectiveSRH)
                         .style('fill', 'transparent')
                         .style('pointer-events', 'all')
                         .on('mouseover', function() {

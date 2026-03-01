@@ -76,18 +76,22 @@ function computeSubRowBox(ip, baseY, pairKey, subRowLayout) {
         return { y: baseY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex: -1 };
     }
 
-    const { ipPairOrderByRow } = subRowLayout;
+    const { ipPairOrderByRow, subRowHeights, subRowOffsets } = subRowLayout;
     const pairInfo = ipPairOrderByRow && ipPairOrderByRow.get(baseY);
+    const heightKey = `${ip}|${pairKey}`;
+    const effectiveSRH = (subRowHeights && subRowHeights.get(heightKey)) || SUB_ROW_HEIGHT;
 
     if (!pairInfo || pairInfo.count <= 1) {
-        return { y: baseY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex: -1 };
+        return { y: baseY - effectiveSRH / 2, height: effectiveSRH, pairIndex: -1 };
     }
 
     // Row is expanded — find the specific sub-row for this IP pair
     const pairIndex = pairInfo.order.has(pairKey) ? pairInfo.order.get(pairKey) : 0;
-    const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+    const offsetKey = `${ip}|${pairKey}`;
+    const offset = subRowOffsets && subRowOffsets.get(offsetKey);
+    const centerY = baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
 
-    return { y: centerY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex };
+    return { y: centerY - effectiveSRH / 2, height: effectiveSRH, pairIndex };
 }
 
 /**

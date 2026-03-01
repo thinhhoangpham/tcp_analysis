@@ -77,6 +77,8 @@ export function renderCircles(layer, binned, options) {
         ipRowHeights,
         ipPairCounts,
         stableIpPairOrderByRow,
+        subRowHeights,
+        subRowOffsets,
         mainGroup,
         arcPathGenerator,
         findIPPosition,
@@ -138,7 +140,10 @@ export function renderCircles(layer, binned, options) {
         const pairInfo = ipPairOrderByRow.get(baseY) || { order: new Map(), count: 1 };
         const pairIndex = pairInfo.order.get(ipPairKey) || 0;
 
-        return baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+        // Use precomputed per-sub-row offset (variable heights) when available
+        const offsetKey = `${ip}|${ipPairKey}`;
+        const offset = subRowOffsets && subRowOffsets.get(offsetKey);
+        return baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
     };
 
     // Ensure each item has yPos and calculate offset
@@ -151,7 +156,10 @@ export function renderCircles(layer, binned, options) {
 
         // First pair (pairIndex 0) aligns with baseline (yPos) where label is
         // Subsequent pairs grow DOWNWARD from there
-        const pairCenterY = yPos + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+        // Use precomputed per-sub-row offset (variable heights) when available
+        const offsetKey = `${d.src_ip}|${ipPairKey}`;
+        const offset = subRowOffsets && subRowOffsets.get(offsetKey);
+        const pairCenterY = yPos + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
 
         return {
             ...d,
@@ -181,28 +189,37 @@ export function renderCircles(layer, binned, options) {
                 const fb = b.flagType || b.flag_type || getFlagType(b);
                 return (FLAG_ORDER_MAP.get(fa) ?? 99) - (FLAG_ORDER_MAP.get(fb) ?? 99);
             });
-            // Determine available spread range (collapse-aware)
-            const sample = group[0];
-            let spreadRange;
-            if (sample.ipPairKey === '__collapsed__') {
-                // Collapsed: use the full row height
-                const ip = sample.src_ip;
-                const rowHeight = (ipRowHeights && ipRowHeights.get(ip)) || (ROW_GAP || 30);
-                spreadRange = Math.max(20, rowHeight - 6);
-            } else {
-                // Expanded: fixed sub-row height (doubled when separateFlags is on,
-                // since ipPositioning already allocated double height)
-                spreadRange = separateFlags ? SUB_ROW_HEIGHT * 2 : SUB_ROW_HEIGHT;
-            }
             const n = group.length;
-            // Step: fit within spread range, capped so circles don't crowd.
-            // Enforce minimum step of 2*RADIUS_MIN so circles never overlap
-            // (may overflow sub-row bounds in expanded mode — acceptable trade-off).
-            const maxRadius = Math.max(...group.map(d => d.binned && d.count > 1 ? rScale(d.count) : RADIUS_MIN));
-            const step = Math.min(spreadRange / n, maxRadius * 2.5);
-            const center = sample.yPosWithOffset;
-            for (let i = 0; i < n; i++) {
-                group[i].yPosWithOffset = center + (i - (n - 1) / 2) * step;
+            const center = group[0].yPosWithOffset;
+
+            // Sequential packing: place circles touching each other (no overlap)
+            // Each circle's center is offset by the sum of its own radius and the
+            // previous circle's radius, so the total span = sum of all diameters.
+            const radii = group.map(d => d.binned && d.count > 1 ? rScale(d.count) : RADIUS_MIN);
+            const totalSpan = radii.reduce((sum, r) => sum + 2 * r, 0);
+
+            // For collapsed rows, clamp the span to the available row height
+            let effectiveSpan = totalSpan;
+            if (group[0].ipPairKey === '__collapsed__') {
+                const ip = group[0].src_ip;
+                const rowHeight = (ipRowHeights && ipRowHeights.get(ip)) || (ROW_GAP || 30);
+                effectiveSpan = Math.min(totalSpan, Math.max(20, rowHeight - 6));
+            }
+
+            if (effectiveSpan < totalSpan) {
+                // Not enough space — fall back to even spacing within available range
+                const step = effectiveSpan / n;
+                for (let i = 0; i < n; i++) {
+                    group[i].yPosWithOffset = center + (i - (n - 1) / 2) * step;
+                }
+            } else {
+                // Sequential packing: position each circle after the previous one
+                let cursor = -totalSpan / 2;
+                for (let i = 0; i < n; i++) {
+                    cursor += radii[i]; // move to center of this circle
+                    group[i].yPosWithOffset = center + cursor;
+                    cursor += radii[i]; // move past this circle's edge
+                }
             }
         }
     }
@@ -398,6 +415,60 @@ export function renderCircles(layer, binned, options) {
                 return exit.remove();
             }
         );
+
+    // --- Sub-row labels: show target IP in front of first circle of each expanded sub-row ---
+    layer.selectAll('.sub-row-ip-label').remove();
+
+    if (ipPairOrderByRow) {
+        // Find the leftmost circle per sub-row (keyed by "src_ip|ipPairKey")
+        const subRowInfo = new Map();
+        for (const d of processed) {
+            if (d.ipPairKey === '__collapsed__') continue;
+            const key = `${d.src_ip}|${d.ipPairKey}`;
+            const cx = getFinalCx(d);
+            const r = d.binned && d.count > 1 ? rScale(d.count) : RADIUS_MIN;
+            if (!subRowInfo.has(key)) {
+                subRowInfo.set(key, { src_ip: d.src_ip, ipPairKey: d.ipPairKey, minCx: cx, radius: r, yPos: d.yPos });
+            } else if (cx < subRowInfo.get(key).minCx) {
+                subRowInfo.get(key).minCx = cx;
+                subRowInfo.get(key).radius = r;
+            }
+        }
+
+        // Count visible sub-rows per source IP to identify multi-pair rows
+        const subRowCountByIp = new Map();
+        for (const info of subRowInfo.values()) {
+            subRowCountByIp.set(info.src_ip, (subRowCountByIp.get(info.src_ip) || 0) + 1);
+        }
+
+        // Render labels only for expanded multi-pair rows
+        for (const [, info] of subRowInfo) {
+            if ((subRowCountByIp.get(info.src_ip) || 0) <= 1) continue;
+
+            // Extract target IP from the canonical pair key
+            const parts = info.ipPairKey.split('<->');
+            const targetIp = parts[0] === info.src_ip ? parts[1] : parts[0];
+
+            // Compute stable sub-row center Y (not affected by flag separation)
+            const pairEntry = ipPairOrderByRow.get(info.yPos);
+            const pairIndex = pairEntry ? (pairEntry.order.get(info.ipPairKey) || 0) : 0;
+            const labelOffsetKey = `${info.src_ip}|${info.ipPairKey}`;
+            const labelOffset = subRowOffsets && subRowOffsets.get(labelOffsetKey);
+            const labelY = info.yPos + (labelOffset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
+
+            layer.append('text')
+                .attr('class', 'sub-row-ip-label')
+                .attr('x', info.minCx - info.radius - 4)
+                .attr('y', labelY)
+                .attr('dy', '.35em')
+                .attr('text-anchor', 'end')
+                .text(targetIp)
+                .style('font-size', '9px')
+                .style('fill', '#888')
+                .style('font-style', 'italic')
+                .style('pointer-events', 'none');
+        }
+    }
 
     // Return processed data so callers can access final positions (with flag separation)
     return processed;

@@ -497,6 +497,7 @@ export function wireControlPanelControls(opts) {
     on('showSubRowArcs', 'change', (e) => { if (opts.onToggleSubRowArcs) opts.onToggleSubRowArcs(e.target.checked); });
     on('separateFlags', 'change', (e) => { if (opts.onToggleSeparateFlags) opts.onToggleSeparateFlags(e.target.checked); });
     on('showFlowThreading', 'change', (e) => { if (opts.onToggleFlowThreading) opts.onToggleFlowThreading(e.target.checked); });
+    on('enableBoxSelection', 'change', (e) => { if (opts.onToggleBoxSelection) opts.onToggleBoxSelection(e.target.checked); });
 }
 
 // Inline SVG arc icon matching the flag color legend in the packet view

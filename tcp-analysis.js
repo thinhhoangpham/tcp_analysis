@@ -398,6 +398,116 @@ function computeCollapsedMaxCounts(binnedPackets, collapsedIPs) {
 }
 
 /**
+ * Compute needed sub-row heights based on actual flag circle stacking.
+ * For each (IP, pairKey) sub-row, finds the maximum sum-of-diameters
+ * across all co-located flag groups at any time position.
+ *
+ * @param {Array} binnedPackets - Binned packet data (post-collapse)
+ * @param {Function} rScale - Radius scale function
+ * @returns {Map<string, number>} "ip|pairKey" → max needed sub-row height
+ */
+function computeFlagSeparationHeights(binnedPackets, rScale) {
+    // Group by (src_ip, ipPairKey, timeKey) to find co-located flags
+    const groups = new Map();
+    for (const d of binnedPackets) {
+        if (!d.src_ip || !d.dst_ip) continue;
+        const ipPairKey = d.ipPairKey === '__collapsed__' ? '__collapsed__'
+            : makeIpPairKey(d.src_ip, d.dst_ip);
+        const tKey = Math.floor(
+            d.binned && Number.isFinite(d.binCenter) ? d.binCenter
+            : (Number.isFinite(d.binTimestamp) ? d.binTimestamp : d.timestamp)
+        );
+        const groupKey = `${d.src_ip}|${ipPairKey}|${tKey}`;
+        if (!groups.has(groupKey)) groups.set(groupKey, []);
+        groups.get(groupKey).push(d);
+    }
+
+    // For each (IP, pairKey) sub-row, find the max sum-of-diameters
+    const perSubRowHeight = new Map(); // "ip|pairKey" → max height needed
+    for (const group of groups.values()) {
+        if (group.length <= 1) continue;
+        const ip = group[0].src_ip;
+        const ipPairKey = group[0].ipPairKey === '__collapsed__' ? '__collapsed__'
+            : makeIpPairKey(group[0].src_ip, group[0].dst_ip);
+        const subRowKey = `${ip}|${ipPairKey}`;
+        let totalDiameters = 0;
+        for (const d of group) {
+            const r = d.binned && d.count > 1 ? rScale(d.count) : RADIUS_MIN;
+            totalDiameters += 2 * r;
+        }
+        const current = perSubRowHeight.get(subRowKey) || SUB_ROW_HEIGHT;
+        if (totalDiameters > current) {
+            perSubRowHeight.set(subRowKey, totalDiameters);
+        }
+    }
+    return perSubRowHeight;
+}
+
+/**
+ * Compute per-sub-row Y offsets and IP row heights from per-sub-row stacking heights.
+ * Each sub-row gets exactly the height it needs, and the offset is cumulative so
+ * sub-rows with different heights pack tightly.
+ *
+ * @param {Map<string, number>} perSubRowHeight - "ip|pairKey" → needed height
+ * @param {Map<number, {order: Map, count: number}>} ipPairOrderByRow
+ * @param {Map<string, number>} ipPositions - IP → baseY
+ * @param {Array<string>} ipOrder
+ * @param {Set<string>} collapsedIPs
+ * @returns {{ subRowOffsets: Map<string, number>, subRowHeights: Map<string, number>, ipRowHeightUpdates: Map<string, number> }}
+ */
+function computeSubRowLayout(perSubRowHeight, ipPairOrderByRow, ipPositions, ipOrder, collapsedIPs) {
+    const subRowOffsets = new Map();   // "ip|pairKey" → Y offset from baseY
+    const subRowHeights = new Map();   // "ip|pairKey" → effective height
+    const ipRowHeightUpdates = new Map();
+
+    for (const ip of ipOrder) {
+        if (collapsedIPs && collapsedIPs.has(ip)) continue;
+
+        const baseY = ipPositions.get(ip);
+        if (baseY === undefined) continue;
+
+        const pairInfo = ipPairOrderByRow.get(baseY);
+        if (!pairInfo) continue;
+
+        // Sort sub-rows by their pair index (stable ordering)
+        const sortedPairs = [...pairInfo.order.entries()].sort((a, b) => a[1] - b[1]);
+
+        let prevCenter = 0;
+        let prevHalfH = 0;
+        let firstH = 0;
+
+        for (let i = 0; i < sortedPairs.length; i++) {
+            const [pairKey] = sortedPairs[i];
+            const key = `${ip}|${pairKey}`;
+            const h = Math.max(SUB_ROW_HEIGHT, perSubRowHeight.get(key) || SUB_ROW_HEIGHT);
+            subRowHeights.set(key, h);
+
+            if (i === 0) {
+                subRowOffsets.set(key, 0);
+                prevCenter = 0;
+                prevHalfH = h / 2;
+                firstH = h;
+            } else {
+                // Place this sub-row so the gap between it and the previous is SUB_ROW_GAP
+                const center = prevCenter + prevHalfH + SUB_ROW_GAP + h / 2;
+                subRowOffsets.set(key, center);
+                prevCenter = center;
+                prevHalfH = h / 2;
+            }
+        }
+
+        // Total row height: from top of first sub-row to bottom of last + padding
+        if (sortedPairs.length > 0) {
+            const totalHeight = firstH / 2 + prevCenter + prevHalfH + SUB_ROW_GAP;
+            const neededRowHeight = Math.max(ROW_GAP, totalHeight);
+            ipRowHeightUpdates.set(ip, neededRowHeight);
+        }
+    }
+
+    return { subRowOffsets, subRowHeights, ipRowHeightUpdates };
+}
+
+/**
  * Apply collapse overrides to ipPairOrderByRow for collapsed IPs.
  * All pairs for a collapsed IP get index 0, count 1.
  */
@@ -416,49 +526,8 @@ function applyCollapseOverrides(ipPairOrderByRow) {
 }
 
 /**
- * Calculate the vertical position for the expand-all button based on visible IPs.
- * @param {number} marginTop - The chart's top margin (px)
- */
-function updateExpandAllBtnPosition(marginTop) {
-    const container = document.getElementById('chart-container');
-    const btn = document.getElementById('expand-all-btn');
-    if (!container || !btn) return;
-
-    // Collect y-positions (in container content space) of ALL IPs
-    let minY = Infinity, maxY = -Infinity;
-    for (const [, yPos] of state.layout.ipPositions) {
-        const contentY = yPos + marginTop;
-        if (contentY < minY) minY = contentY;
-        if (contentY > maxY) maxY = contentY;
-    }
-
-    if (minY === Infinity) { btn.style.display = 'none'; return; }
-
-    // Visible viewport in content-space coordinates
-    const viewTop = container.scrollTop;
-    const viewBottom = viewTop + container.clientHeight;
-
-    // Clamp the IP span to the visible viewport
-    const clampedTop = Math.max(minY, viewTop);
-    const clampedBottom = Math.min(maxY, viewBottom);
-
-    let centerY;
-    if (clampedTop <= clampedBottom) {
-        // IPs overlap with viewport — center within the overlap
-        centerY = (clampedTop + clampedBottom) / 2;
-    } else {
-        // No IPs visible — center in viewport
-        centerY = viewTop + container.clientHeight / 2;
-    }
-
-    btn.style.top = (centerY - 12) + 'px'; // 12 = half button height (24px)
-}
-
-/** Scroll listener reference so we don't double-bind */
-let _expandAllScrollBound = false;
-
-/**
- * Create or update the floating "Expand/Collapse All" sub-row button.
+ * Create or update the sticky "Expand/Collapse All" sub-row button.
+ * Uses CSS `position: sticky` to stay visible at the top while scrolling.
  * Called after renderIPRowLabels on each render.
  * @param {number} marginTop - The chart's top margin (px)
  */
@@ -478,7 +547,8 @@ function createOrUpdateExpandAllBtn(marginTop) {
     if (!btn) {
         btn = document.createElement('div');
         btn.id = 'expand-all-btn';
-        container.appendChild(btn);
+        // Insert as first child so sticky positioning works from the top
+        container.insertBefore(btn, container.firstChild);
 
         btn.addEventListener('click', () => {
             if (state.layout.collapsedIPs.size > 0) {
@@ -498,27 +568,6 @@ function createOrUpdateExpandAllBtn(marginTop) {
             drawSelectedFlowArcs();
             applyInvalidReasonFilter();
         });
-
-        btn.addEventListener('mouseenter', () => {
-            const circle = btn.querySelector('circle');
-            if (!circle) return;
-            const collapsed = state.layout.collapsedIPs.size > 0;
-            circle.setAttribute('fill', collapsed ? '#5a6268' : '#218838');
-        });
-        btn.addEventListener('mouseleave', () => {
-            const circle = btn.querySelector('circle');
-            if (!circle) return;
-            const collapsed = state.layout.collapsedIPs.size > 0;
-            circle.setAttribute('fill', collapsed ? '#6c757d' : '#28a745');
-        });
-    }
-
-    // Bind scroll + resize listeners once
-    if (!_expandAllScrollBound) {
-        _expandAllScrollBound = true;
-        container.addEventListener('scroll', () => updateExpandAllBtnPosition(marginTop), { passive: true });
-        // ResizeObserver catches layout shifts (overview chart appearing, window resize)
-        new ResizeObserver(() => updateExpandAllBtnPosition(marginTop)).observe(container);
     }
 
     btn.style.display = hasMultiPairIPs ? '' : 'none';
@@ -527,21 +576,36 @@ function createOrUpdateExpandAllBtn(marginTop) {
     // Visual state: collapsed → gray + right chevron; expanded → green + down chevron
     const isCollapsedState = state.layout.collapsedIPs.size > 0;
     const fill = isCollapsedState ? '#6c757d' : '#28a745';
+    const hoverFill = isCollapsedState ? '#5a6268' : '#218838';
     const chevron = isCollapsedState
         ? 'M -2 -3 L 2 0 L -2 3'   // right chevron (collapsed state)
         : 'M -3 -2 L 0 2 L 3 -2';  // down chevron (expanded state)
+    const label = isCollapsedState ? 'Expand All' : 'Collapse All';
     const title = isCollapsedState ? 'Expand all sub-rows' : 'Collapse all sub-rows';
 
     btn.title = title;
+    const pillW = isCollapsedState ? 96 : 106;
     btn.innerHTML = `
-        <svg width="24" height="24" viewBox="-12 -12 24 24">
-            <circle r="9" fill="${fill}" stroke="#fff" stroke-width="2" style="transition: fill 0.2s ease;"/>
-            <path d="${chevron}" fill="none" stroke="#fff" stroke-width="2.5"
-                  stroke-linecap="round" stroke-linejoin="round"/>
+        <svg width="${pillW}" height="24" viewBox="0 0 ${pillW} 24" style="display:block;">
+            <rect rx="12" ry="12" width="${pillW}" height="24" fill="${fill}"
+                  stroke="#fff" stroke-width="1.5" style="transition: fill 0.2s ease;"/>
+            <g transform="translate(14, 12)">
+                <path d="${chevron}" fill="none" stroke="#fff" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+            </g>
+            <text x="26" y="16.5" fill="#fff" font-size="12" font-weight="600"
+                  font-family="system-ui, -apple-system, sans-serif">${label}</text>
         </svg>`;
 
-    // Position after layout settles (DOM may not be final during render)
-    requestAnimationFrame(() => updateExpandAllBtnPosition(marginTop));
+    // Hover effect on the pill background
+    btn.onmouseenter = () => {
+        const rect = btn.querySelector('rect');
+        if (rect) rect.setAttribute('fill', hoverFill);
+    };
+    btn.onmouseleave = () => {
+        const rect = btn.querySelector('rect');
+        if (rect) rect.setAttribute('fill', fill);
+    };
 }
 
 /**
@@ -555,7 +619,10 @@ function getIPYWithSubRowOffset(ip, srcIp, dstIp) {
     const pairInfo = state.layout.ipPairOrderByRow.get(baseY);
     if (!pairInfo || pairInfo.count <= 1) return baseY;
     const pairIndex = pairInfo.order.get(pairKey) || 0;
-    return baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+    // Use precomputed offset when available (per-sub-row variable heights)
+    const offsetKey = `${ip}|${pairKey}`;
+    const offset = state.layout.subRowOffsets && state.layout.subRowOffsets.get(offsetKey);
+    return baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
 }
 
 /**
@@ -623,9 +690,14 @@ function syncSubRowHighlights(svgEl, st) {
         if (!d || !d.ip) return;
         const baseY = st.layout.ipPositions.get(d.ip);
         if (baseY === undefined) return;
-        const centerY = baseY + d.pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
-        rect.attr('y', centerY - SUB_ROW_HEIGHT / 2)
-            .attr('height', SUB_ROW_HEIGHT);
+        // Use precomputed per-sub-row offset and height
+        const offsetKey = `${d.ip}|${d.pairKey}`;
+        const offset = st.layout.subRowOffsets && st.layout.subRowOffsets.get(offsetKey);
+        const centerY = baseY + (offset ?? d.pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
+        const heightKey = `${d.ip}|${d.pairKey}`;
+        const effectiveSRH = (st.layout.subRowHeights && st.layout.subRowHeights.get(heightKey)) || SUB_ROW_HEIGHT;
+        rect.attr('y', centerY - effectiveSRH / 2)
+            .attr('height', effectiveSRH);
     });
 }
 
@@ -673,6 +745,8 @@ function renderCirclesWithOptions(layer, binned, rScale, transitionOpts) {
         ipRowHeights: state.layout.ipRowHeights,
         ipPairCounts: state.layout.ipPairCounts,
         stableIpPairOrderByRow: state.layout.ipPairOrderByRow,
+        subRowHeights: state.layout.subRowHeights,
+        subRowOffsets: state.layout.subRowOffsets,
         mainGroup,
         arcPathGenerator,
         findIPPosition,
@@ -2027,6 +2101,8 @@ function drawGroundTruthBoxes(selectedIPs) {
         subRowLayout: {
             ipPairOrderByRow: state.layout.ipPairOrderByRow,
             ipRowHeights: state.layout.ipRowHeights,
+            subRowHeights: state.layout.subRowHeights,
+            subRowOffsets: state.layout.subRowOffsets,
             rowGap: ROW_GAP
         }
     });
@@ -2767,9 +2843,12 @@ async function refreshWithCurrentResolution() {
                 console.warn(`[Resolution] No data available for ${result?.resolution || 'unknown'} resolution, falling back`);
             }
 
-            // Recompute stable IP pair ordering from the new resolution's data
+            // Recompute stable IP pair ordering from the new resolution's data.
+            // Update IN PLACE to keep closure references in renderIPRowLabels valid.
             try {
-                state.layout.ipPairOrderByRow = computeIPPairOrderByRow(result.data, state.layout.ipPositions);
+                const newOrderRes = computeIPPairOrderByRow(result.data, state.layout.ipPositions);
+                state.layout.ipPairOrderByRow.clear();
+                for (const [k, v] of newOrderRes) state.layout.ipPairOrderByRow.set(k, v);
                 applyCollapseOverrides(state.layout.ipPairOrderByRow);
             } catch (e) { logCatchError('recomputeIpPairOrder', e); }
 
@@ -4176,7 +4255,9 @@ function detectIPRowFromY(y) {
 
     let bestPairKey = null, bestPartnerIP = null, bestPairIndex = 0, bestSubDist = Infinity;
     for (const [pairKey, pairIndex] of pairInfo.order) {
-        const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+        const offsetKey = `${bestIP}|${pairKey}`;
+        const offset = state.layout.subRowOffsets && state.layout.subRowOffsets.get(offsetKey);
+        const centerY = baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
         const dist = Math.abs(y - centerY);
         if (dist < bestSubDist) {
             bestSubDist = dist;
@@ -4251,8 +4332,12 @@ function computeSubRowBounds(ip, pairKey) {
 
     const pairIndex = pairInfo.order.get(pairKey);
     if (pairIndex === undefined) return null;
-    const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
-    return { boxY: centerY - SUB_ROW_HEIGHT / 2, boxH: SUB_ROW_HEIGHT };
+    const offsetKey = `${ip}|${pairKey}`;
+    const offset = state.layout.subRowOffsets && state.layout.subRowOffsets.get(offsetKey);
+    const centerY = baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
+    const heightKey = `${ip}|${pairKey}`;
+    const effectiveSRH = (state.layout.subRowHeights && state.layout.subRowHeights.get(heightKey)) || SUB_ROW_HEIGHT;
+    return { boxY: centerY - effectiveSRH / 2, boxH: effectiveSRH };
 }
 
 /**
@@ -4644,14 +4729,15 @@ function visualizeTimeArcs(packets) {
     }
 
     state.layout.ipPositions.clear();
+    state.layout.subRowHeights = null;   // Reset; recomputed post-binning if separateFlags is on
+    state.layout.subRowOffsets = null;
     const positioning = computeIPPositioning(packets, {
         state,
         rowGap: ROW_GAP,
         topPad: TOP_PAD,
         timearcsOrder: state.timearcs.ipOrder,
         dotRadius: DOT_RADIUS,
-        collapsedIPs: state.layout.collapsedIPs,
-        separateFlags: state.ui.separateFlags
+        collapsedIPs: state.layout.collapsedIPs
     });
 
     // Apply positioning to state
@@ -4730,6 +4816,8 @@ function visualizeTimeArcs(packets) {
             collapsedIPs: state.layout.collapsedIPs,
             ipPairOrderByRow: state.layout.ipPairOrderByRow,
             ipRowHeights: state.layout.ipRowHeights,
+            subRowHeights: state.layout.subRowHeights,
+            subRowOffsets: state.layout.subRowOffsets,
             onToggleCollapse: (ip) => {
                 if (state.layout.collapsedIPs.has(ip)) {
                     state.layout.collapsedIPs.delete(ip);
@@ -4830,7 +4918,7 @@ function visualizeTimeArcs(packets) {
         ipPositions: state.layout.ipPositions,
         ipRowHeights: state.layout.ipRowHeights,
         onReorder: () => {
-            try { state.layout.ipPairOrderByRow = computeIPPairOrderByRow(state.data.filtered, state.layout.ipPositions); applyCollapseOverrides(state.layout.ipPairOrderByRow); } catch(e) { logCatchError('recomputeIpPairOrder', e); }
+            try { const newOrderDrag = computeIPPairOrderByRow(state.data.filtered, state.layout.ipPositions); state.layout.ipPairOrderByRow.clear(); for (const [k, v] of newOrderDrag) state.layout.ipPairOrderByRow.set(k, v); applyCollapseOverrides(state.layout.ipPairOrderByRow); } catch(e) { logCatchError('recomputeIpPairOrder', e); }
             try {
                 // Sync row highlights with new positions
                 svg.selectAll('.row-highlight')
@@ -4925,10 +5013,13 @@ function visualizeTimeArcs(packets) {
                     }
                 }
                 // Rebuild ipPairOrderByRow with new positions so sub-row
-                // offsets resolve correctly (keys are yPos-based)
-                state.layout.ipPairOrderByRow = computeIPPairOrderByRow(
+                // offsets resolve correctly (keys are yPos-based).
+                // Update IN PLACE to keep closure references in renderIPRowLabels valid.
+                const newOrderCollapse = computeIPPairOrderByRow(
                     packets, state.layout.ipPositions
                 );
+                state.layout.ipPairOrderByRow.clear();
+                for (const [k, v] of newOrderCollapse) state.layout.ipPairOrderByRow.set(k, v);
                 applyCollapseOverrides(state.layout.ipPairOrderByRow);
                 // Sync node label positions with updated IP positions
                 svg.selectAll('.node')
@@ -4947,6 +5038,91 @@ function visualizeTimeArcs(packets) {
                 svg.select('#clip rect').attr('height', height + (2 * DOT_RADIUS));
             }
         }
+    }
+
+    // Adjust row heights for flag separation based on actual per-sub-row circle stacking
+    if (state.ui.separateFlags) {
+        const rScaleForHeights = d3.scaleSqrt()
+            .domain([1, Math.max(1, globalMaxBinCount)])
+            .range([RADIUS_MIN, RADIUS_MAX]);
+
+        const perSubRowHeight = computeFlagSeparationHeights(
+            initialRenderData.binnedPackets, rScaleForHeights
+        );
+
+        const { subRowOffsets, subRowHeights, ipRowHeightUpdates } = computeSubRowLayout(
+            perSubRowHeight,
+            state.layout.ipPairOrderByRow,
+            state.layout.ipPositions,
+            state.layout.ipOrder,
+            state.layout.collapsedIPs
+        );
+
+        state.layout.subRowHeights = subRowHeights;
+        state.layout.subRowOffsets = subRowOffsets;
+
+        let flagPositionsChanged = false;
+        for (const [ip, neededRowHeight] of ipRowHeightUpdates) {
+            const current = state.layout.ipRowHeights.get(ip) || ROW_GAP;
+            if (neededRowHeight > current) {
+                state.layout.ipRowHeights.set(ip, neededRowHeight);
+                flagPositionsChanged = true;
+            }
+        }
+
+        if (flagPositionsChanged) {
+            // Recompute cumulative y positions
+            let currentY = TOP_PAD;
+            state.layout.ipOrder.forEach(ip => {
+                state.layout.ipPositions.set(ip, currentY);
+                currentY += state.layout.ipRowHeights.get(ip) || ROW_GAP;
+            });
+            // Update bin yPos values to match new positions
+            for (const d of initialRenderData.binnedPackets) {
+                if (d.src_ip) {
+                    const newY = state.layout.ipPositions.get(d.src_ip);
+                    if (newY !== undefined) d.yPos = newY;
+                }
+            }
+            // Rebuild ipPairOrderByRow with new positions.
+            // Update IN PLACE to keep closure references in renderIPRowLabels valid.
+            const newOrderFlags = computeIPPairOrderByRow(
+                packets, state.layout.ipPositions
+            );
+            state.layout.ipPairOrderByRow.clear();
+            for (const [k, v] of newOrderFlags) state.layout.ipPairOrderByRow.set(k, v);
+            applyCollapseOverrides(state.layout.ipPairOrderByRow);
+
+            // Recompute offsets with updated ipPairOrderByRow (keys changed due to new yPos)
+            const layoutResult = computeSubRowLayout(
+                perSubRowHeight,
+                state.layout.ipPairOrderByRow,
+                state.layout.ipPositions,
+                state.layout.ipOrder,
+                state.layout.collapsedIPs
+            );
+            state.layout.subRowOffsets = layoutResult.subRowOffsets;
+            state.layout.subRowHeights = layoutResult.subRowHeights;
+
+            // Sync node label positions with updated IP positions
+            svg.selectAll('.node')
+                .attr('transform', d => `translate(0,${state.layout.ipPositions.get(d)})`);
+            svg.selectAll('.row-highlight')
+                .attr('y', d => (state.layout.ipPositions.get(d) || 0) - ROW_GAP / 2)
+                .attr('height', d => (state.layout.ipRowHeights && state.layout.ipRowHeights.get(d)) || ROW_GAP);
+            syncSubRowHighlights(svg, state);
+            // Update SVG height
+            const lastIp = state.layout.ipOrder[state.layout.ipOrder.length - 1];
+            const lastH = state.layout.ipRowHeights.get(lastIp) || ROW_GAP;
+            const newMaxY = state.layout.ipPositions.get(lastIp) || 0;
+            height = Math.max(500, newMaxY + lastH + 40 + TOP_PAD);
+            svgContainer.attr('height', height + margin.top + margin.bottom);
+            svg.select('#clip rect').attr('height', height + (2 * DOT_RADIUS));
+        }
+    } else {
+        // When separateFlags is off, clear sub-row layout overrides
+        state.layout.subRowHeights = null;
+        state.layout.subRowOffsets = null;
     }
 
     fullDomainBinsCache = { version: state.data.version, data: initialRenderData.binnedPackets, binSize: null, sorted: true };

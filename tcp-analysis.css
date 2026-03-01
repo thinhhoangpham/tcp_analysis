@@ -267,21 +267,22 @@ label {
     fill: #495057 !important;
 }
 
-/* Expand/Collapse All sub-rows button — floats in the left margin */
+/* Expand/Collapse All sub-rows button — sticky at top of label column */
 #expand-all-btn {
-    position: absolute;
-    left: 10px;
+    position: sticky;
+    top: 8px;
+    left: 2px;
     z-index: 10;
     cursor: pointer;
-    opacity: 0.75;
+    opacity: 0.8;
     transition: opacity 0.2s ease, transform 0.15s ease;
     pointer-events: auto;
-    border-radius: 50%;
     line-height: 0;
+    width: fit-content;
 }
 #expand-all-btn:hover {
     opacity: 1;
-    transform: scale(1.15);
+    transform: scale(1.08);
 }
 
 /* Sub-row highlight styles for pair-specific connectivity */
@@ -317,6 +318,12 @@ label {
 .node-label.connected {
     fill: #000;
     font-weight: 500;
+}
+
+/* Sub-row IP labels (shown when IP rows are expanded) */
+.sub-row-ip-label {
+    font-family: monospace;
+    user-select: none;
 }
 
 /* Direction dot highlight states */
