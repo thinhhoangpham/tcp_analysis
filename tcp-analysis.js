@@ -3810,7 +3810,12 @@ function renderFlowDetailView(flow, packets) {
     dynamicLayer.style('display', null);
 
     // Draw permanent sequential arcs connecting packets
-    drawFlowDetailArcs(flow, preparedPackets);
+    mainGroup.selectAll('.flow-detail-arc').remove();
+    mainGroup.selectAll('.flow-detail-arcs').remove();
+    const fdLineGroup = mainGroup.append('g').attr('class', 'flow-detail-arcs').attr('clip-path', 'url(#clip)');
+    drawFlowDetailArcs(fdLineGroup, 'flow-detail-arc', preparedPackets,
+        p => xScale(p.timestamp),
+        p => p.yPos || getIPYWithSubRowOffset(p.src_ip, p.src_ip, p.dst_ip));
 
     // Update x-axis with zoom-adaptive formatting
     if (bottomOverlayAxisGroup && state.data.timeExtent) {
@@ -3824,92 +3829,124 @@ function renderFlowDetailView(flow, packets) {
 /**
  * Draw permanent lines connecting sequential packets in flow detail view
  */
-function drawFlowDetailArcs(flow, packets) {
-    if (!mainGroup || packets.length < 2) return;
+/**
+ * Draw sequential arcs connecting an ordered list of packets, with midpoint
+ * arrowheads and a trailing dashed arc from the last packet to the
+ * destination IP row.
+ *
+ * Single implementation used by both flow-detail mode and raw-zoom
+ * auto-threading.
+ *
+ * @param {Object}   lineGroup - D3 <g> to append SVG elements into
+ * @param {string}   cssClass  - CSS class for elements (e.g. 'flow-detail-arc')
+ * @param {Array}    packets   - Time-sorted packets for one flow
+ * @param {Function} getX      - (packet) => x pixel
+ * @param {Function} getY      - (packet) => y pixel
+ */
+function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
+    if (!lineGroup || packets.length < 2) return;
 
-    // Remove any existing flow detail lines
-    mainGroup.selectAll('.flow-detail-arc').remove();
-    mainGroup.selectAll('.flow-detail-arcs').remove();
-
-    // Create line group
-    const lineGroup = mainGroup.append('g')
-        .attr('class', 'flow-detail-arcs')
-        .attr('clip-path', 'url(#clip)');
-
-    // Arrow size for midpoint arrowheads
     const arrowLen = 5;
     const arrowHalfW = 3;
 
-    // Draw lines between consecutive packets
-    // S-curves for packets between different IPs, straight lines for same IP
+    // -- Sequential packet-to-packet arcs --
     for (let i = 0; i < packets.length - 1; i++) {
         const p1 = packets[i];
         const p2 = packets[i + 1];
-
         if (!p1 || !p2) continue;
 
-        const x1 = xScale(p1.timestamp);
-        const x2 = xScale(p2.timestamp);
-        const y1 = p1.yPos || getIPYWithSubRowOffset(p1.src_ip, p1.src_ip, p1.dst_ip);
-        const y2 = p2.yPos || getIPYWithSubRowOffset(p2.src_ip, p2.src_ip, p2.dst_ip);
+        const x1 = getX(p1);
+        const x2 = getX(p2);
+        const y1 = getY(p1);
+        const y2 = getY(p2);
 
-        // Get color from flag type of the source packet
-        const flagType = p1.flagType || 'OTHER';
+        const flagType = p1.flagType || p1.flag_type || getFlagType(p1);
         const color = flagColors[flagType] || flagColors['OTHER'] || '#999';
 
         const sameIP = p1.src_ip === p2.src_ip;
         let midPtX, midPtY, angle;
 
         if (sameIP) {
-            // Straight line for same-IP packets
             lineGroup.append('line')
-                .attr('class', 'flow-detail-arc')
-                .attr('x1', x1)
-                .attr('y1', y1)
-                .attr('x2', x2)
-                .attr('y2', y2)
+                .attr('class', cssClass)
+                .attr('x1', x1).attr('y1', y1)
+                .attr('x2', x2).attr('y2', y2)
                 .attr('stroke', color)
                 .attr('stroke-width', 1.5)
                 .attr('stroke-opacity', 0.6);
-
             midPtX = (x1 + x2) / 2;
             midPtY = (y1 + y2) / 2;
             angle = Math.atan2(y2 - y1, x2 - x1);
         } else {
-            // S-curve for different-IP packets
             const midX = (x1 + x2) / 2;
             lineGroup.append('path')
-                .attr('class', 'flow-detail-arc')
+                .attr('class', cssClass)
                 .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`)
                 .attr('fill', 'none')
                 .attr('stroke', color)
                 .attr('stroke-width', 1.5)
                 .attr('stroke-opacity', 0.6);
-
-            // Midpoint of cubic bezier at t=0.5: ((x1+x2)/2, (y1+y2)/2)
             midPtX = midX;
             midPtY = (y1 + y2) / 2;
-            // Tangent at t=0.5: proportional to (x2-x1, 2*(y2-y1))
             angle = Math.atan2(2 * (y2 - y1), x2 - x1);
         }
 
-        // Draw arrowhead triangle at the midpoint
+        // Midpoint arrowhead
         const cos = Math.cos(angle);
         const sin = Math.sin(angle);
-        // Tip of the arrow (forward along tangent)
         const tipX = midPtX + arrowLen * cos;
         const tipY = midPtY + arrowLen * sin;
-        // Two base corners (perpendicular to tangent)
-        const baseX1 = midPtX - arrowLen * cos + arrowHalfW * sin;
-        const baseY1 = midPtY - arrowLen * sin - arrowHalfW * cos;
-        const baseX2 = midPtX - arrowLen * cos - arrowHalfW * sin;
-        const baseY2 = midPtY - arrowLen * sin + arrowHalfW * cos;
-
+        const bx1 = midPtX - arrowLen * cos + arrowHalfW * sin;
+        const by1 = midPtY - arrowLen * sin - arrowHalfW * cos;
+        const bx2 = midPtX - arrowLen * cos - arrowHalfW * sin;
+        const by2 = midPtY - arrowLen * sin + arrowHalfW * cos;
         lineGroup.append('polygon')
-            .attr('class', 'flow-detail-arc')
-            .attr('points', `${tipX},${tipY} ${baseX1},${baseY1} ${baseX2},${baseY2}`)
+            .attr('class', cssClass)
+            .attr('points', `${tipX},${tipY} ${bx1},${by1} ${bx2},${by2}`)
             .attr('fill', color)
             .attr('fill-opacity', 0.8);
+    }
+
+    // -- Trailing arc: last packet → destination IP row --
+    // Dashed S-curve showing where the final packet was headed (no dot).
+    const lastPkt = packets[packets.length - 1];
+    const prevPkt = packets[packets.length - 2];
+    if (lastPkt && prevPkt && lastPkt.src_ip !== lastPkt.dst_ip) {
+        const lastX = getX(lastPkt);
+        const prevX = getX(prevPkt);
+        const lastY = getY(lastPkt);
+        const trailDstY = getIPYWithSubRowOffset(lastPkt.dst_ip, lastPkt.src_ip, lastPkt.dst_ip);
+        if (trailDstY != null && lastY != null) {
+            const trailFt = lastPkt.flagType || lastPkt.flag_type || getFlagType(lastPkt);
+            const trailColor = flagColors[trailFt] || flagColors['OTHER'] || '#999';
+            const trailEndX = lastX + Math.max(20, Math.abs(lastX - prevX));
+            const trailMidX = (lastX + trailEndX) / 2;
+            lineGroup.append('path')
+                .attr('class', cssClass)
+                .attr('d', `M${lastX},${lastY} C${trailMidX},${lastY} ${trailMidX},${trailDstY} ${trailEndX},${trailDstY}`)
+                .attr('fill', 'none')
+                .attr('stroke', trailColor)
+                .attr('stroke-width', 1.5)
+                .attr('stroke-opacity', 0.4)
+                .attr('stroke-dasharray', '3,2');
+
+            const tMidPtX = trailMidX;
+            const tMidPtY = (lastY + trailDstY) / 2;
+            const tAngle = Math.atan2(2 * (trailDstY - lastY), trailEndX - lastX);
+            const tCos = Math.cos(tAngle);
+            const tSin = Math.sin(tAngle);
+            const tTipX = tMidPtX + arrowLen * tCos;
+            const tTipY = tMidPtY + arrowLen * tSin;
+            const tB1x = tMidPtX - arrowLen * tCos + arrowHalfW * tSin;
+            const tB1y = tMidPtY - arrowLen * tSin - arrowHalfW * tCos;
+            const tB2x = tMidPtX - arrowLen * tCos - arrowHalfW * tSin;
+            const tB2y = tMidPtY - arrowLen * tSin + arrowHalfW * tCos;
+            lineGroup.append('polygon')
+                .attr('class', cssClass)
+                .attr('points', `${tTipX},${tTipY} ${tB1x},${tB1y} ${tB2x},${tB2y}`)
+                .attr('fill', trailColor)
+                .attr('fill-opacity', 0.5);
+        }
     }
 }
 
@@ -3984,78 +4021,13 @@ function drawAutoFlowThreading(packets) {
         .attr('class', 'flow-threading-arcs')
         .attr('clip-path', 'url(#clip)');
 
-    // Arrow dimensions (same as drawFlowDetailArcs)
-    const arrowLen = 5;
-    const arrowHalfW = 3;
-
     // Draw sequential arcs within each flow group
     for (const [key, group] of flowGroups) {
-        // -- Sequential packet-to-packet arcs --
-        for (let i = 0; i < group.length - 1; i++) {
-            const p1 = group[i];
-            const p2 = group[i + 1];
-            if (!p1 || !p2) continue;
-
-            const x1 = xScale(p1.timestamp || p1.binCenter);
-            const x2 = xScale(p2.timestamp || p2.binCenter);
-            // Use actual circle positions (accounts for flag separation + sub-row offset)
-            const flagType1 = p1.flagType || p1.flag_type || getFlagType(p1);
-            const flagType2 = p2.flagType || p2.flag_type || getFlagType(p2);
-            const y1 = lookupCircleY(circlePosMap, p1.timestamp || p1.binCenter || 0, p1.src_ip, p1.dst_ip, flagType1);
-            const y2 = lookupCircleY(circlePosMap, p2.timestamp || p2.binCenter || 0, p2.src_ip, p2.dst_ip, flagType2);
-
-            // Color by flag type of the source packet
-            const flagType = flagType1;
-            const color = flagColors[flagType] || flagColors['OTHER'] || '#999';
-
-            const sameIP = p1.src_ip === p2.src_ip;
-            let midPtX, midPtY, angle;
-
-            if (sameIP) {
-                // Straight line for consecutive same-direction packets
-                lineGroup.append('line')
-                    .attr('class', 'flow-threading-arc')
-                    .attr('x1', x1).attr('y1', y1)
-                    .attr('x2', x2).attr('y2', y2)
-                    .attr('stroke', color)
-                    .attr('stroke-width', 1.5)
-                    .attr('stroke-opacity', 0.6);
-
-                midPtX = (x1 + x2) / 2;
-                midPtY = (y1 + y2) / 2;
-                angle = Math.atan2(y2 - y1, x2 - x1);
-            } else {
-                // S-curve for direction changes (request <-> response)
-                const midX = (x1 + x2) / 2;
-                lineGroup.append('path')
-                    .attr('class', 'flow-threading-arc')
-                    .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`)
-                    .attr('fill', 'none')
-                    .attr('stroke', color)
-                    .attr('stroke-width', 1.5)
-                    .attr('stroke-opacity', 0.6);
-
-                midPtX = midX;
-                midPtY = (y1 + y2) / 2;
-                angle = Math.atan2(2 * (y2 - y1), x2 - x1);
-            }
-
-            // Midpoint arrowhead triangle
-            const cos = Math.cos(angle);
-            const sin = Math.sin(angle);
-            const tipX = midPtX + arrowLen * cos;
-            const tipY = midPtY + arrowLen * sin;
-            const bx1 = midPtX - arrowLen * cos + arrowHalfW * sin;
-            const by1 = midPtY - arrowLen * sin - arrowHalfW * cos;
-            const bx2 = midPtX - arrowLen * cos - arrowHalfW * sin;
-            const by2 = midPtY - arrowLen * sin + arrowHalfW * cos;
-
-            lineGroup.append('polygon')
-                .attr('class', 'flow-threading-arc')
-                .attr('points', `${tipX},${tipY} ${bx1},${by1} ${bx2},${by2}`)
-                .attr('fill', color)
-                .attr('fill-opacity', 0.8);
-        }
+        // Sequential arcs + trailing arc (shared with flow-detail mode)
+        drawFlowDetailArcs(lineGroup, 'flow-threading-arc', group,
+            p => xScale(p.timestamp || p.binCenter),
+            p => lookupCircleY(circlePosMap, p.timestamp || p.binCenter || 0, p.src_ip, p.dst_ip,
+                p.flagType || p.flag_type || getFlagType(p)));
 
         // -- Edge continuation lines (dashed) --
         const flowMeta = flowMetaByKey.get(key);
@@ -4563,7 +4535,12 @@ function renderFlowDetailViewZoomed() {
         .attr('cx', d => xScale(d.timestamp));
 
     // Redraw lines with new positions
-    drawFlowDetailArcs(state.flowDetail.flow, preparedPackets);
+    mainGroup.selectAll('.flow-detail-arc').remove();
+    mainGroup.selectAll('.flow-detail-arcs').remove();
+    const fdLineGroup2 = mainGroup.append('g').attr('class', 'flow-detail-arcs').attr('clip-path', 'url(#clip)');
+    drawFlowDetailArcs(fdLineGroup2, 'flow-detail-arc', preparedPackets,
+        p => xScale(p.timestamp),
+        p => p.yPos || getIPYWithSubRowOffset(p.src_ip, p.src_ip, p.dst_ip));
 }
 
 /**
