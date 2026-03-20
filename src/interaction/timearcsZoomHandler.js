@@ -302,18 +302,13 @@ export function createTimeArcsZoomHandler(context) {
                 Math.floor(xScale.domain()[1]) >= Math.floor(timeExtent[1])
             );
 
-            // === IP Row Filtering ===
+            // === IP Row Filtering (full-domain case) ===
             // At full zoom-out: restore all rows to their base positions.
-            // Zoomed in: show only rows with connections in the visible window.
-            if (applyIPRowFilter && restoreBaseRows) {
+            // The zoomed-in case is handled below, after binnedPackets is available.
+            if (restoreBaseRows && atFullDomain && !flowsFilteringActive) {
                 try {
-                    if (atFullDomain && !flowsFilteringActive) {
-                        restoreBaseRows();
-                    } else if (!atFullDomain) {
-                        const quickVisible = getVisiblePackets(state.data.filtered, xScale);
-                        if (quickVisible.length > 0) applyIPRowFilter(quickVisible);
-                    }
-                } catch(e) { logCatchError('ipRowFilter', e); }
+                    restoreBaseRows();
+                } catch(e) { logCatchError('restoreBaseRows', e); }
             }
 
             const currentCache = getFullDomainBinsCache();
@@ -465,6 +460,16 @@ export function createTimeArcsZoomHandler(context) {
             }
 
             try { updateZoomDurationLabel(); } catch (e) { logCatchError('updateZoomDurationLabel', e); }
+
+            // === IP Row Filtering (zoomed-in case) ===
+            // Now that binnedPackets is available, filter rows to only those with
+            // visible data. binnedPackets already contains only the visible range
+            // with src_ip/dst_ip fields, so no need for getVisiblePackets().
+            if (applyIPRowFilter && !atFullDomain && binnedPackets && binnedPackets.length > 0) {
+                try {
+                    applyIPRowFilter(binnedPackets);
+                } catch(e) { logCatchError('applyIPRowFilter', e); }
+            }
 
             const globalMaxBinCount = getGlobalMaxBinCount();
             const rScale = d3.scaleSqrt()
