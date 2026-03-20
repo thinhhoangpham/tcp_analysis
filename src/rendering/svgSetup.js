@@ -111,15 +111,17 @@ export function createBottomOverlay(options) {
     }
     bottomOverlayRoot.attr('transform', `translate(${chartMarginLeft},0)`);
 
-    // Position axis near bottom
-    const axisY = Math.max(20, overlayHeight - 20);
+    // Position axis with room for dual-band labels below
+    const axisY = Math.max(20, overlayHeight - 34);
 
     // Remove existing axis and create new one
     bottomOverlaySvg.select('.main-bottom-axis').remove();
     const bottomOverlayAxisGroup = bottomOverlayRoot.append('g')
         .attr('class', 'x-axis axis main-bottom-axis')
-        .attr('transform', `translate(0,${axisY})`)
-        .call(d3.axisBottom(xScale).tickFormat(tickFormatter));
+        .attr('transform', `translate(0,${axisY})`);
+    if (tickFormatter) {
+        bottomOverlayAxisGroup.call(d3.axisBottom(xScale).tickFormat(tickFormatter));
+    }
 
     // Remove existing label and create new one
     bottomOverlaySvg.select('.overlay-duration-label').remove();
@@ -404,7 +406,7 @@ export function resizeBottomOverlay(options) {
         bottomOverlayRoot.attr('transform', `translate(${chartMarginLeft},0)`);
     }
 
-    if (bottomOverlayAxisGroup && xScale) {
+    if (bottomOverlayAxisGroup && xScale && tickFormatter) {
         bottomOverlayAxisGroup.call(d3.axisBottom(xScale).tickFormat(tickFormatter));
     }
 }

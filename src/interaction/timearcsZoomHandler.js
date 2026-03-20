@@ -107,7 +107,6 @@ export function createTimeArcsZoomHandler(context) {
         drawSelectedFlowArcs,
         drawSubRowArcs,
         drawGroundTruthBoxes,
-        createZoomAdaptiveTickFormatter,
         getVisiblePackets,
         buildSelectedFlowKeySet,
         makeConnectionKey,
@@ -155,9 +154,7 @@ export function createTimeArcsZoomHandler(context) {
 
             // Update axis
             if (bottomOverlayAxisGroup) {
-                bottomOverlayAxisGroup.call(
-                    d3.axisBottom(xScale).tickFormat(createZoomAdaptiveTickFormatter(() => xScale))
-                );
+                bottomOverlayAxisGroup.call(xAxis);
             }
 
             // Update brush and duration label

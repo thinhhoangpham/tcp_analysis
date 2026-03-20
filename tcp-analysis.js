@@ -17,6 +17,7 @@ import {
     makeConnectionKey, clamp, normalizeProtocolValue,
     createSmartTickFormatter, createZoomAdaptiveTickFormatter
 } from './src/utils/formatters.js';
+import { createDualBandAxis } from './src/scales/dualBandAxis.js';
 import {
     classifyFlags, getFlagType, flagPhase, isFlagVisibleByPhase,
     has, isSYN, isSYNACK, isACKonly,
@@ -205,6 +206,7 @@ let svg, mainGroup, width, height, xScale, yScale, zoom;
 let bottomOverlaySvg = null;
 let bottomOverlayRoot = null;
 let bottomOverlayAxisGroup = null;
+let dualAxis = null;
 let bottomOverlayDurationLabel = null;
 let bottomOverlayWidth = 0;
 let bottomOverlayHeight = 140; // generous to fit axis + legends without changing sizes
@@ -1029,7 +1031,7 @@ function initializeBarVisualization() {
                 setTimeout(() => {
                     try {
                         try {
-                            const axisBaseY = Math.max(20, bottomOverlayHeight - 20);
+                            const axisBaseY = Math.max(20, bottomOverlayHeight - 34);
                             drawSizeLegend(bottomOverlayRoot, width, bottomOverlayHeight, axisBaseY);
                         } catch(e) { logCatchError('drawSizeLegend', e); }
                         drawFlagLegend();
@@ -1175,11 +1177,10 @@ function setupWindowResizeHandler() {
             
             // Update main chart axis and legends with zoom-adaptive formatting
             if (bottomOverlayAxisGroup && xScale && state.data.timeExtent) {
-                const axis = d3.axisBottom(xScale).tickFormat(createZoomAdaptiveTickFormatter(() => xScale));
-                bottomOverlayAxisGroup.call(axis);
+                bottomOverlayAxisGroup.call(dualAxis);
                 
                 // Redraw legends with new dimensions
-                const axisBaseY = Math.max(20, bottomOverlayHeight - 20);
+                const axisBaseY = Math.max(20, bottomOverlayHeight - 34);
                 if (bottomOverlayDurationLabel) {
                     bottomOverlayDurationLabel.attr('y', axisBaseY - 12);
                 }
@@ -4186,7 +4187,7 @@ function renderFlowDetailView(flow, packets) {
 
     // Update x-axis with zoom-adaptive formatting
     if (bottomOverlayAxisGroup && state.data.timeExtent) {
-        bottomOverlayAxisGroup.call(d3.axisBottom(xScale).tickFormat(createZoomAdaptiveTickFormatter(() => xScale)));
+        bottomOverlayAxisGroup.call(dualAxis);
     }
 
     // Update IP labels to show only relevant IPs
@@ -4769,13 +4770,16 @@ function visualizeTimeArcs(packets) {
             chartMarginRight,
             overlayHeight: bottomOverlayHeight,
             xScale,
-            tickFormatter: createZoomAdaptiveTickFormatter(() => xScale)
+            tickFormatter: null  // dual-band axis handles its own formatting
         });
         bottomOverlaySvg = overlayResult.bottomOverlaySvg;
         bottomOverlayRoot = overlayResult.bottomOverlayRoot;
         bottomOverlayAxisGroup = overlayResult.bottomOverlayAxisGroup;
         bottomOverlayDurationLabel = overlayResult.bottomOverlayDurationLabel;
         bottomOverlayWidth = overlayResult.bottomOverlayWidth;
+        // Create dual-band axis (reused for all subsequent updates)
+        dualAxis = createDualBandAxis({ scale: xScale });
+        bottomOverlayAxisGroup.call(dualAxis);
     } catch (e) { LOG('Overlay init failed', e); }
 
     // 11. Create duration label updater using extracted module
@@ -4902,7 +4906,7 @@ function visualizeTimeArcs(packets) {
     };
 
     // 14. Create zoom handler using extracted module (will be updated during zoom)
-    const xAxis = d3.axisBottom(xScale).tickFormat(createZoomAdaptiveTickFormatter(() => xScale));
+    // xAxis is now dualAxis — already created above
 
     const zoomed = createTimeArcsZoomHandler({
         d3,
@@ -4919,7 +4923,7 @@ function visualizeTimeArcs(packets) {
         setFullDomainBinsCache: (cache) => { fullDomainBinsCache = cache; },
         getIsHardResetInProgress: () => isHardResetInProgress,
         setIsHardResetInProgress: (val) => { isHardResetInProgress = val; },
-        xAxis,
+        xAxis: dualAxis,
         updateBrushFromZoom,
         updateZoomDurationLabel,
         updateZoomIndicator,
@@ -4928,7 +4932,6 @@ function visualizeTimeArcs(packets) {
         drawSelectedFlowArcs,
         drawSubRowArcs,
         drawGroundTruthBoxes,
-        createZoomAdaptiveTickFormatter,
         getVisiblePackets,
         buildSelectedFlowKeySet,
         makeConnectionKey,
@@ -5233,7 +5236,7 @@ function visualizeTimeArcs(packets) {
             bottomOverlayRoot,
             bottomOverlayAxisGroup,
             xScale,
-            tickFormatter: createZoomAdaptiveTickFormatter(() => xScale)
+            tickFormatter: null  // dual-band axis handles formatting
         });
     } catch(e) { logCatchError('bottomOverlayResize', e); }
 }
