@@ -564,6 +564,16 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
         timearcsLayout = null;
       }
 
+      // Destroy force layout from previous load
+      if (forceLayout) {
+        forceLayout.destroy();
+        forceLayout = null;
+      }
+      if (forceLayoutLayer) {
+        forceLayoutLayer.remove();
+        forceLayoutLayer = null;
+      }
+
       // Clear chart SVG to free DOM memory
       svg.selectAll('*').remove();
       d3.select('#axis-top').selectAll('*').remove();
@@ -1048,13 +1058,21 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
       return _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
     };
 
-    // Build initial positions from timearcs Y
+    // Arrange IPs in a circle for well-spaced initial positions
+    // (avoids NaN from cramped vertical line with many IPs)
     const drawWidth = width - MARGIN.left - MARGIN.right;
+    const viewportH = window.innerHeight || height;
     const centerX = MARGIN.left + drawWidth / 2;
+    const centerY = MARGIN.top + Math.max(400, viewportH - 160) / 2;
+    const radius = Math.min(drawWidth, viewportH - 160) / 3;
     const initialPositions = new Map();
-    for (const ip of ctx.allIps) {
-      const yPos = ctx.yScaleLens ? ctx.yScaleLens(ip) : MARGIN.top + 50;
-      initialPositions.set(ip, { x: centerX, y: yPos });
+    const n = ctx.allIps.length;
+    for (let i = 0; i < n; i++) {
+      const angle = (2 * Math.PI * i) / n;
+      initialPositions.set(ctx.allIps[i], {
+        x: centerX + radius * Math.cos(angle),
+        y: centerY + radius * Math.sin(angle)
+      });
     }
 
     // Create force layout
@@ -1095,6 +1113,52 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
 
   async function transitionToTimearcs() {
     layoutTransitionInProgress = true;
+
+    // If no timearcs DOM exists (initial load was force_layout mode),
+    // render timearcs first (hidden) so the transition animation has elements to work with.
+    if (svg.selectAll('path.arc').empty()) {
+      // Hide SVG during render to prevent timearcs flash
+      svg.style('visibility', 'hidden');
+
+      // Temporarily switch to timearcs mode and null forceLayout so render()
+      // builds full timearcs DOM with correct SVG height (line 776 check)
+      const savedLayoutMode = layoutMode;
+      const savedForceLayout = forceLayout;
+      layoutMode = 'timearcs';
+      labelMode = 'timearcs';
+      forceLayout = null;
+      isRenderingFilteredData = false;
+      await timearcsLayout.render(originalData, false, originalData);
+      layoutMode = savedLayoutMode;
+      labelMode = savedLayoutMode;
+      forceLayout = savedForceLayout;
+
+      // Force-finalize IP positions — render() returns before Phase 3 animation
+      // completes, so _evenlyDistributedYPositions isn't set yet. Populate it
+      // from _finalY so yScaleLens returns correct values for the transition.
+      if (timearcsLayout._finalY && timearcsLayout._currentSortedIps) {
+        timearcsLayout._evenlyDistributedYPositions = new Map();
+        for (const ip of timearcsLayout._currentSortedIps) {
+          const yPos = timearcsLayout._finalY(ip);
+          if (yPos !== undefined) {
+            timearcsLayout._evenlyDistributedYPositions.set(ip, yPos);
+          }
+        }
+      }
+
+      // Hide all timearcs elements — they'll be revealed by the animation below
+      svg.selectAll('path.arc').style('display', 'none');
+      svg.selectAll('.row-line, .ip-label').style('opacity', 0).style('pointer-events', 'none');
+      svg.selectAll('.component-toggle').style('opacity', 0).style('pointer-events', 'none');
+
+      // Re-append force layout layer so it renders on top of timearcs elements
+      if (forceLayoutLayer) {
+        forceLayoutLayer.raise();
+      }
+
+      // Restore SVG visibility
+      svg.style('visibility', null);
+    }
 
     // --- Phase 1: Position arcs at force node positions ---
 

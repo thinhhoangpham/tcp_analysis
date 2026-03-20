@@ -511,6 +511,15 @@ export class TimearcsLayout {
     }).filter(l => l !== null);
     this._linksWithNodes = linksWithNodes;
 
+    // For force_layout mode, skip all rendering (arcs, labels, simulation)
+    // and return immediately — the force layout renders independently.
+    if (layoutMode === 'force_layout') {
+      if (this._onRenderComplete) {
+        this._onRenderComplete(this.getContext());
+      }
+      return;
+    }
+
     const updateNodePositions = () => {
       const firstTimeTickX = xScaleLens(tsMin);
       const labelOffset = 15;
@@ -637,16 +646,6 @@ export class TimearcsLayout {
     // ── Brush setup ───────────────────────────────────────────────
     this._setupDragToBrush(arcPaths, linksWithNodes, xScaleLens, yScaleLens, widthScale, layoutMode);
 
-    // ─────────────────────────────────────────────────────────────
-    // If force_layout is the active mode, set hidden arc positions
-    // and call back immediately — force layout renders on top.
-    // ─────────────────────────────────────────────────────────────
-    if (layoutMode === 'force_layout') {
-      // Expose context before running the slow simulation
-      if (this._onRenderComplete) {
-        this._onRenderComplete(this.getContext());
-      }
-    }
 
     // ─────────────────────────────────────────────────────────────
     // Phase 1: Force simulation for IP vertical ordering
